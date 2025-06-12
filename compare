@@ -33,3 +33,22 @@ public static <T> Map<String, Object[]> compareFieldsDetailed(T o1, T o2, List<S
 				
 			}
 		}
+
+
+//
+
+incidentToSave.getEnforcementActions().stream()
+    .flatMap(enforcementAction -> enforcementAction.getProperties().stream())
+    .forEach(property -> {
+        existingIncident.getEnforcementActions().stream()
+            .flatMap(existingAction -> existingAction.getProperties().stream())
+            .filter(existingProperty -> 
+                Objects.equals(property.getPropertyId(), existingProperty.getPropertyId()) &&
+                !Objects.equals(property.getDescription(), existingProperty.getDescription()))
+            .findFirst() // once match is found, no need to keep searching
+            .ifPresent(matchingProperty -> {
+                AtfAdmin ad = new AtfAdmin();
+                ad.setSpecialInstructions(property.getDescription());
+                admin.add(ad);
+            });
+    });
