@@ -15,3 +15,21 @@ public static <T> Map<String, Object[]> compareFieldsDetailed(T o1, T o2, List<S
     }
     return diffs;
 }
+
+
+
+		for (NCEnforcementAction enforcementAction : incidentToSave.getEnforcementActions()) {
+			for (NCProperty property : enforcementAction.getProperties()) {
+				for (NCEnforcementAction existingEnforcementAction : existingIncident.getEnforcementActions()) {
+				for (NCProperty existingProperty : existingEnforcementAction.getProperties()) {
+					if(Objects.equals(property.getPropertyId(), existingProperty.getPropertyId()) && 
+							!Objects.equals(property.getDescription(), existingProperty.getDescription())) {
+						AtfAdmin ad = new AtfAdmin();
+						ad.setSpecialInstructions(property.getDescription());
+						admin.add(ad);
+					}
+				}
+				}
+				
+			}
+		}
