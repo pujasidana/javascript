@@ -1,0 +1,17 @@
+public static <T> Map<String, Object[]> compareFieldsDetailed(T o1, T o2, List<String> fieldNames) {
+    Map<String, Object[]> diffs = new LinkedHashMap<>();
+    for (String field : fieldNames) {
+        try {
+            Field f = o1.getClass().getDeclaredField(field);
+            f.setAccessible(true);
+            Object v1 = f.get(o1);
+            Object v2 = f.get(o2);
+            if (!Objects.equals(v1, v2)) {
+                diffs.put(field, new Object[]{v1, v2});
+            }
+        } catch (Exception e) {
+            e.printStackTrace(); // Or log properly
+        }
+    }
+    return diffs;
+}
