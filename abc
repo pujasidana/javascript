@@ -1,0 +1,269 @@
+
+   private ResponseEntity<AtfTracesResponse> sendMessagestoEtrace(AtfTracesRequestBody tracesRequestBody) {
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBasicAuth(userName, password, StandardCharsets.UTF_8);
+        
+        ResponseEntity<AtfTracesResponse> response = null;
+
+        HttpEntity<AtfTracesRequestBody> postEntity = new HttpEntity<>(tracesRequestBody, headers);
+        LOG.info("Data sent to Etrace URL: {}",  tracesRequestBody);
+
+        LOG.info("Sending post request to Etrace URL: {}, payload size: {}", etraceAtfUrl + "/traces",
+                tracesRequestBody.getTraces().size());
+
+        try {
+            response = restTemplate.exchange(etraceAtfUrl + "/traces",
+                    HttpMethod.POST, postEntity, AtfTracesResponse.class);
+
+            if (response.getBody() == null || (response.getStatusCode().isError())) {
+                LOG.error("HTTP error invoking Etrace URL: {}, error: {}", etraceAtfUrl + "/traces",
+                        response.getStatusCodeValue());
+            } else {
+                LOG.info("Etrace info response: {}  Accepted: {}, Duplicate: {}, Rejected: {}", response, 
+                        response.getBody().getAccepted(), response.getBody().getDuplicates(),
+                        response.getBody().getRejected());
+            }
+        } catch (HttpServerErrorException se) {
+            LOG.error("Exception invoking Etrace Create Traces URL: {}, HttpServerErrorException: {}", etraceAtfUrl + "/traces",
+                    se.getStackTrace());
+            return response;
+        } catch (RestClientException e) {
+            LOG.error("Exception invoking Etrace Create Traces URL: {}, RestClientException: {}", etraceAtfUrl + "/traces",
+                    e.getStackTrace());
+            return response;
+        }
+        
+        return response;
+    }
+
+@Override
+	public void sendEtraceIncidentUpdatesPostApproval(NCIncident existingIncident, NCIncident incidentToSave) {
+
+		if (!atfEnabled) {
+			return;
+		}
+
+		if (isIncidentNotEligibleToSendTraces(incidentToSave)) {
+			return;
+		}
+
+		AtfRequestor requestor = new AtfRequestor();
+		AtfRecovery recovery = new AtfRecovery();
+		List<AtfIndividual> individual = new ArrayList<>();
+		AtfIndividual ind = new AtfIndividual();
+		Boolean recoveryInfoUpdated = false;
+		Set<BaseEntity> seen = new LinkedHashSet<BaseEntity>();
+		List<ObjectDiff> changed = new ArrayList<>();
+		Set<Class<?>> classesToIgnore = new LinkedHashSet<>();
+		seacatsObjectDiffUtil.findChanges(existingIncident, incidentToSave, "", changed, seen, classesToIgnore);
+
+		requestor.setRequestorEtraceUserId("USCBPTWS1");
+
+		for (ObjectDiff change : changed) {
+			if (change.getUpdatePath().contains("/incidentSeizure/seizingOfficerName")) {
+				updateSeizureOfficerName(incidentToSave, requestor);
+			}
+			if (change.getUpdatePath().contains("/incidentSeizure/seizureDate")) {
+				updateSeizureDate(incidentToSave, recovery);
+				recoveryInfoUpdated = true;
+			}
+
+			if (change.getUpdatePath().contains("/subject/")) {
+				for (NCEnforcementAction nCEnforcementAction : incidentToSave.getEnforcementActions()) {
+					if (Boolean.TRUE.equals(nCEnforcementAction.getCancelIndicator())) {
+						LOG.info("Ignoring creating Etrace Message for cancelled violator id: {}",
+						        nCEnforcementAction.getSubject().getSubjectId());
+						continue;
+					}
+					updateViolatorInfo(nCEnforcementAction, ind, change);
+					individual.add(ind);
+				}
+			}
+		}
+		// create traces for updated fields 
+		List<AtfTrace> traces = new ArrayList<AtfTrace>();
+		updatedTracesList(traces, incidentToSave, individual, recovery, requestor, recoveryInfoUpdated);
+
+		if (!traces.isEmpty()) {
+			sendUpdatedTraces(traces, incidentToSave.getIncidentNumber());
+		}
+
+	}
+	
+	@Override
+	public void sendEtracePropertyUpdatesPostApproval(NCProperty existingProperty, NCProperty property) {
+
+		if (!atfEnabled) {
+			return;
+		}
+		
+		if (!isPropertyEligibleToSendTraces(property)) {
+			return;
+		}
+
+		AtfTrace trace = new AtfTrace();
+		AtfAdmin admin = new AtfAdmin();
+		List<AtfTrace> traces = new ArrayList<AtfTrace>();
+
+		Set<BaseEntity> seen = new LinkedHashSet<BaseEntity>();
+		List<ObjectDiff> changed = new ArrayList<>();
+		Set<Class<?>> classesToIgnore = new LinkedHashSet<>();
+		seacatsObjectDiffUtil.findChanges(existingProperty, property, "", changed, seen, classesToIgnore);
+
+		for (ObjectDiff change : changed) {
+			if (change.getUpdatePath().contains("/description")) {
+
+				admin.setSpecialInstructions(property.getDescription());
+				AtfEtraceMsgStatusEntry entry = etraceMsgStusRepo.findByPropertyId(property.getPropertyId());
+				if (entry != null) {
+					trace.setTraceId(entry.getTraceId());
+				}
+				trace.setRecordNumber(traces.size() + 1);
+				trace.setAdmin(admin);
+				traces.add(trace);
+			}
+		}
+
+		if (!traces.isEmpty()) {
+			sendUpdatedTraces(traces, property.getEnforcementAction().getIncident().getIncidentNumber());
+		}
+	}
+
+	private void updateSeizureOfficerName(NCIncident incidentToSave, AtfRequestor requestor) {
+
+		if (!StringUtils.isEmpty(incidentToSave.getIncidentSeizure().getSeizingOfficerName())) {
+			String[] names = incidentToSave.getIncidentSeizure().getSeizingOfficerName().split(",");
+			requestor.setPrimaryOfficerLastName(names.length > 0 ? names[0].trim() : "LNU");
+			requestor.setPrimaryOfficerFirstName(names.length > 1 ? names[1].trim() : "FNU");
+		}
+	}
+
+	private void updateSeizureDate(NCIncident incidentToSave, AtfRecovery recovery) {
+
+		SimpleDateFormat dateFormatter = new SimpleDateFormat("MM/dd/yyyy");
+		recovery.setRecoveryDate(dateFormatter.format(incidentToSave.getIncidentSeizure().getSeizureDate()));
+		RefPortCode portAddress = incidentToSave.getPortCode();
+		if (portAddress != null) {
+			recovery.setState(portAddress.getPortStateCode());
+			recovery.setZipCode(portAddress.getPortZipCode());
+			recovery.setCountry(US);
+		} else {
+			recovery.setState(UNKNOWN_STATE);
+			recovery.setCity(UNKNOWN);
+			recovery.setCountry(US);
+		}
+	}
+
+	private void updateViolatorInfo(NCEnforcementAction nCEnforcementAction, AtfIndividual ind, ObjectDiff change) {
+		if (change.getUpdatePath().contains("/subject/firstName")) {
+			ind.setFirstName(nCEnforcementAction.getSubject().getFirstName());
+
+		}
+		if (change.getUpdatePath().contains("/subject/lastName")) {
+			ind.setLastName(nCEnforcementAction.getSubject().getLastName());
+
+		}
+		if (change.getUpdatePath().contains("/subject/middleName")) {
+			ind.setMiddleName(nCEnforcementAction.getSubject().getMiddleName());
+
+		}
+		if (change.getUpdatePath().contains("/subject/race")) {
+			ind.setRace(nCEnforcementAction.getSubject().getRace());
+
+		}
+		if (change.getUpdatePath().contains("/subject/sex")) {
+			ind.setSex(nCEnforcementAction.getSubject().getSex());
+		}
+		if (change.getUpdatePath().contains("/subject") && change.getUpdatePath().contains("/streetName")) {
+			ind.setStreetName(Optional.ofNullable(nCEnforcementAction.getSubject().getSubjectAddress().getStreetName())
+			        .orElse(null));
+		}
+		if (change.getUpdatePath().contains("/subject")) {
+			if (change.getUpdatePath().contains("/stateCode")) {
+				ind.setState(Optional.ofNullable(nCEnforcementAction.getSubject().getSubjectAddress().getStateCode())
+				        .orElse(null));
+			}
+			if (change.getUpdatePath().contains("/cityName")) {
+				ind.setCity(Optional.ofNullable(nCEnforcementAction.getSubject().getSubjectAddress().getCityName())
+				        .orElse(null));
+			}
+			if (change.getUpdatePath().contains("/countryCode")) {
+				ind.setCountry(
+				        Optional.ofNullable(nCEnforcementAction.getSubject().getSubjectAddress().getCountryCode())
+				                .orElse(null));
+			}
+			if (change.getUpdatePath().contains("/zipCode")) {
+				ind.setZipCode(Optional.ofNullable(nCEnforcementAction.getSubject().getSubjectAddress().getZipCode())
+				        .orElse(null));
+			}
+		}
+
+	}
+	
+	private void updatedTracesList(List<AtfTrace> traces, NCIncident incidentToSave, List<AtfIndividual> individual,
+	        AtfRecovery recovery, AtfRequestor requestor, Boolean recoveryInfoUpdated) {
+
+		for (NCEnforcementAction enforcementAction : incidentToSave.getEnforcementActions()) {
+			for (NCProperty property : enforcementAction.getProperties()) {
+				if (isPropertyEligibleToSendTraces(property)) {
+					AtfTrace trace = new AtfTrace();
+					if (!individual.isEmpty()) {
+						trace.setIndividual(individual);
+					}
+					trace.setRequestor(requestor);
+					if (recoveryInfoUpdated) {
+						trace.setRecovery(recovery);
+					}
+					trace.setRecordNumber(traces.size() + 1);
+					AtfEtraceMsgStatusEntry entry = etraceMsgStusRepo.findByPropertyId(property.getPropertyId());
+					if (entry != null) {
+						trace.setTraceId(entry.getTraceId());
+					} else {
+						continue;
+					}
+					traces.add(trace);
+				}
+			}
+		}
+
+	}
+	
+	private void sendUpdatedTraces(List<AtfTrace> traces, String incidentNumber) {
+		AtfTracesRequestBody tracesRequestBody = new AtfTracesRequestBody();
+		UUID uuid = UUID.randomUUID();
+		tracesRequestBody.setBatchId(uuid.getMostSignificantBits());
+		tracesRequestBody.setBatchTag("Seacats_TracesBatch_" + incidentNumber + "_" + tracesRequestBody.getBatchId());
+		tracesRequestBody.setCount(traces.size());
+		tracesRequestBody.setTraces(traces);
+
+		HttpHeaders headers = new HttpHeaders();
+		headers.setContentType(MediaType.APPLICATION_JSON);
+		headers.setBasicAuth(userName, password, StandardCharsets.UTF_8);
+
+		ResponseEntity<AtfTracesResponse> response = null;
+
+		HttpEntity<AtfTracesRequestBody> postEntity = new HttpEntity<>(tracesRequestBody, headers);
+		LOG.info("Data sent to Etrace URL: {}", tracesRequestBody);
+
+		LOG.info("Sending post request to Etrace URL: {}, payload size: {}", etraceAtfUrl + "/traces",
+		        tracesRequestBody.getTraces().size());
+
+		try {
+			response = restTemplate.exchange(etraceAtfUrl + "/traces", HttpMethod.PUT, postEntity,
+			        AtfTracesResponse.class);
+
+			if (response.getBody() == null || (response.getStatusCode().isError())) {
+				LOG.error("HTTP error invoking Etrace URL: {}, error: {}", etraceAtfUrl + "/traces",
+				        response.getStatusCodeValue());
+			}
+		} catch (HttpServerErrorException se) {
+			LOG.error("Exception invoking Etrace Create Traces URL: {}, HttpServerErrorException: {}",
+			        etraceAtfUrl + "/traces", se.getStackTrace());
+		} catch (RestClientException e) {
+			LOG.error("Exception invoking Etrace Create Traces URL: {}, RestClientException: {}",
+			        etraceAtfUrl + "/traces", e.getStackTrace());
+		}
+
+	}
