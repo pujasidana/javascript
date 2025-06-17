@@ -267,3 +267,58 @@
 		}
 
 	}
+
+@Test
+void testSendEtraceIncidentUpdatesPostApproval_withSubjectAndRecovery() {
+    NCIncident oldIncident = mock(NCIncident.class);
+    NCIncident newIncident = mock(NCIncident.class);
+    NCIncidentSeizure seizure = mock(NCIncidentSeizure.class);
+    RefPortCode portCode = mock(RefPortCode.class);
+    NCEnforcementAction action = mock(NCEnforcementAction.class);
+    NCProperty property = mock(NCProperty.class);
+    AtfSubject subject = mock(AtfSubject.class);
+    AtfEtraceMsgStatusEntry entry = mock(AtfEtraceMsgStatusEntry.class);
+
+    when(newIncident.getIncidentSeizure()).thenReturn(seizure);
+    when(seizure.getSeizingOfficerName()).thenReturn("Smith, John");
+    when(seizure.getSeizureDate()).thenReturn(new Date());
+    when(newIncident.getPortCode()).thenReturn(portCode);
+    when(portCode.getPortStateCode()).thenReturn("NY");
+    when(portCode.getPortZipCode()).thenReturn("10001");
+
+    when(action.getCancelIndicator()).thenReturn(false);
+    when(action.getSubject()).thenReturn(subject);
+    when(subject.getFirstName()).thenReturn("John");
+    when(subject.getSubjectAddress()).thenReturn(mock(AtfAddress.class));
+    when(property.getPropertyId()).thenReturn(1L);
+    when(action.getProperties()).thenReturn(List.of(property));
+    when(newIncident.getEnforcementActions()).thenReturn(List.of(action));
+    when(property.getEnforcementAction()).thenReturn(action);
+    when(newIncident.getIncidentNumber()).thenReturn("INC002");
+
+    when(etraceMsgStusRepo.findByPropertyId(anyLong())).thenReturn(entry);
+    when(entry.getTraceId()).thenReturn("TRACE-002");
+
+    List<ObjectDiff> diffs = List.of(
+        new ObjectDiff("/incidentSeizure/seizingOfficerName"),
+        new ObjectDiff("/incidentSeizure/seizureDate"),
+        new ObjectDiff("/subject/firstName")
+    );
+    when(seacatsObjectDiffUtil.findChanges(eq(oldIncident), eq(newIncident))).thenReturn(diffs);
+
+    ResponseEntity<AtfTracesResponse> response = mock(ResponseEntity.class);
+    when(response.getBody()).thenReturn(new AtfTracesResponse());
+    when(restTemplate.exchange(anyString(), eq(HttpMethod.POST), any(HttpEntity.class), eq(AtfTracesResponse.class)))
+        .thenReturn(response);
+
+    etraceService.sendEtraceIncidentUpdatesPostApproval(oldIncident, newIncident);
+
+    ArgumentCaptor<HttpEntity> captor = ArgumentCaptor.forClass(HttpEntity.class);
+    verify(restTemplate).exchange(anyString(), eq(HttpMethod.POST), captor.capture(), eq(AtfTracesResponse.class));
+
+    AtfTracesRequestBody body = (AtfTracesRequestBody) captor.getValue().getBody();
+    assertNotNull(body);
+    assertEquals(1, body.getTraces().size());
+    assertEquals("Smith", body.getTraces().get(0).getRequestor().getPrimaryOfficerLastName());
+    assertEquals("NY", body.getTraces().get(0).getRecovery().getState());
+}
