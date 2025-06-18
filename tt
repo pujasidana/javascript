@@ -1,0 +1,196 @@
+   @Override
+	public void sendEtraceIncidentUpdatesPostApproval(NCIncident existingIncident, NCIncident incidentToSave) {
+
+		if (!atfEnabled || isIncidentNotEligibleToSendTraces(incidentToSave)) {
+			return;
+		}
+
+		AtfRequestor requestor = null;
+		AtfRecovery recovery = null;
+		List<AtfIndividual> individual = new ArrayList<>();
+		List<AtfTrace> traces = new ArrayList<AtfTrace>();
+		
+		Boolean recoveryInfoUpdated = false;
+		Boolean violatorInfoUpdated = false;
+		
+		Set<BaseEntity> seen = new LinkedHashSet<BaseEntity>();
+		List<ObjectDiff> changed = new ArrayList<>();
+		Set<Class<?>> classesToIgnore = new LinkedHashSet<>();
+		AtfIndividual ind = new AtfIndividual();
+		
+		seacatsObjectDiffUtil.findChanges(existingIncident, incidentToSave, "", changed, seen, classesToIgnore);
+
+		for (ObjectDiff change : changed) {
+			String path = change.getUpdatePath();
+			if (path.contains("/incidentSeizure/seizingOfficerName")) {
+				updateSeizureOfficerName(incidentToSave, requestor);
+			}
+			if (path.contains("/incidentSeizure/seizureDate")) {
+				updateSeizureDate(incidentToSave, recovery);
+				recoveryInfoUpdated = true;
+			}
+
+			if (path.contains("/subject/")) {
+				
+				for (NCEnforcementAction nCEnforcementAction : incidentToSave.getEnforcementActions()) {
+					if (Boolean.TRUE.equals(nCEnforcementAction.getCancelIndicator())) {
+						LOG.info("Ignoring creating Etrace Message for cancelled violator id: {}",
+						        nCEnforcementAction.getSubject().getSubjectId());
+						continue;
+					}
+					updateViolatorInfo(nCEnforcementAction, ind, change.getUpdatePath());
+					if(path.contains("/subjectAddresses")) {
+						ind.setFirstName(nCEnforcementAction.getSubject().getFirstName());
+						ind.setLastName(nCEnforcementAction.getSubject().getLastName());
+						
+					}
+					violatorInfoUpdated = true;
+				}
+				
+			}
+		}
+		if(violatorInfoUpdated) {
+			individual.add(ind);
+		}
+
+		// create traces for updated fields 
+
+		buildUpdatedTraces(traces, incidentToSave, individual, recovery, requestor, recoveryInfoUpdated);
+
+		if (!traces.isEmpty()) {
+			sendMessagestoEtrace(traces, incidentToSave.getIncidentNumber(), HttpMethod.PUT);
+		}
+
+	}
+	
+	@Override
+	public void sendEtracePropertyUpdatesPostApproval(NCProperty existingProperty, NCProperty property) {
+
+		if (!atfEnabled || !isPropertyEligibleToSendTraces(property)) {
+			return;
+		}
+
+		List<AtfTrace> traces = new ArrayList<AtfTrace>();
+
+		Set<BaseEntity> seen = new LinkedHashSet<BaseEntity>();
+		List<ObjectDiff> changed = new ArrayList<>();
+		Set<Class<?>> classesToIgnore = new LinkedHashSet<>();
+		seacatsObjectDiffUtil.findChanges(existingProperty, property, "", changed, seen, classesToIgnore);
+
+		for (ObjectDiff change : changed) {
+			if (change.getUpdatePath().contains("/description")) {
+
+				AtfAdmin admin = new AtfAdmin();
+				admin.setSpecialInstructions(property.getDescription());
+				admin.setPropertyId(property.getPropertyId());
+
+				AtfEtraceMsgStatusEntry entry = etraceMsgStusRepo.findByPropertyId(property.getPropertyId());
+
+				AtfTrace trace = new AtfTrace();
+				if (entry == null) {
+					continue;
+				}
+				trace.setTraceId(entry.getTraceId());
+				trace.setRecordNumber(traces.size() + 1);
+				trace.setAdmin(admin);
+				traces.add(trace);
+			}
+		}
+
+		if (!traces.isEmpty()) {
+			sendMessagestoEtrace(traces, property.getEnforcementAction().getIncident().getIncidentNumber(),
+			        HttpMethod.PUT);
+		}
+	}
+
+	private void updateSeizureOfficerName(NCIncident incident, AtfRequestor requestor) {
+
+		if (!StringUtils.isEmpty(incident.getIncidentSeizure().getSeizingOfficerName())) {
+			String[] names = incident.getIncidentSeizure().getSeizingOfficerName().split(",");
+			requestor.setPrimaryOfficerLastName(names.length > 0 ? names[0].trim() : LNU);
+			requestor.setPrimaryOfficerFirstName(names.length > 1 ? names[1].trim() : FNU);
+		}
+	}
+
+	private void updateSeizureDate(NCIncident incidentToSave, AtfRecovery recovery) {
+
+		SimpleDateFormat dateFormatter = new SimpleDateFormat("MM/dd/yyyy");
+		recovery.setRecoveryDate(dateFormatter.format(incidentToSave.getIncidentSeizure().getSeizureDate()));
+		RefPortCode portAddress = incidentToSave.getPortCode();
+		if (portAddress != null) {
+			recovery.setState(portAddress.getPortStateCode());
+			recovery.setZipCode(portAddress.getPortZipCode());
+			recovery.setCountry(US);
+		} else {
+			recovery.setState(UNKNOWN_STATE);
+			recovery.setCity(UNKNOWN);
+			recovery.setCountry(US);
+		}
+	}
+
+	private void updateViolatorInfo(NCEnforcementAction nCEnforcementAction, AtfIndividual ind, String path) {
+	
+		if (path.contains("firstName")) {
+			ind.setFirstName(nCEnforcementAction.getSubject().getFirstName());
+		}
+		if (path.contains("lastName")) {
+			ind.setLastName(nCEnforcementAction.getSubject().getLastName());
+		}
+		if (path.contains("middleName")) {
+			ind.setMiddleName(nCEnforcementAction.getSubject().getMiddleName());
+		}
+		if (path.contains("race")) {
+			ind.setRace(nCEnforcementAction.getSubject().getRace());
+		}
+		if (path.contains("sex")) {
+			ind.setSex(nCEnforcementAction.getSubject().getSex());
+		}
+		
+		if (path.contains("/subjectAddresses") ) {
+			if(path.contains("/streetName")) {
+				ind.setStreetName(nCEnforcementAction.getSubject().getSubjectAddress().getStreetName());
+			}
+			if(path.contains("/cityName")) {
+				ind.setCity(nCEnforcementAction.getSubject().getSubjectAddress().getCityName());
+			}
+			if(path.contains("/stateCode")) {
+				ind.setState(nCEnforcementAction.getSubject().getSubjectAddress().getStateCode());
+			}
+			if(path.contains("/countryCode")) {
+				ind.setCountry(nCEnforcementAction.getSubject().getSubjectAddress().getCountryCode());
+			}
+			if(path.contains("/zipCode")) {
+				ind.setZipCode(nCEnforcementAction.getSubject().getSubjectAddress().getZipCode());
+			}
+			
+		}
+	}
+	
+	private void buildUpdatedTraces(List<AtfTrace> traces, NCIncident incidentToSave, List<AtfIndividual> individual,
+	        						AtfRecovery recovery, AtfRequestor requestor, Boolean recoveryInfoUpdated) {
+
+		for (NCEnforcementAction enforcementAction : incidentToSave.getEnforcementActions()) {
+			for (NCProperty property : enforcementAction.getProperties()) {
+				if (isPropertyEligibleToSendTraces(property)) {
+					AtfTrace trace = new AtfTrace();
+					if (!individual.isEmpty()) {
+						trace.setIndividual(individual);
+					}
+					if (recoveryInfoUpdated) {
+						trace.setRecovery(recovery);
+					}
+					trace.setRecordNumber(traces.size() + 1);
+					AtfEtraceMsgStatusEntry entry = etraceMsgStusRepo.findByPropertyId(property.getPropertyId());
+					if (entry == null) {
+						continue;
+					} 
+					if(recoveryInfoUpdated || !individual.isEmpty() || requestor != null) {
+						requestor.setRequestorEtraceUserId("USCBPTWS1");
+						trace.setRequestor(requestor);
+					}
+					trace.setTraceId(entry.getTraceId());
+					traces.add(trace);
+				}
+			}
+		}
+	}
