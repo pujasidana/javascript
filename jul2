@@ -1,0 +1,90 @@
+	private void sendEmailforArmDataChanges(NCProperty existingProperty, NCProperty property,
+	        List<ObjectDiff> changed) {
+
+		LOG.info("sendEmailforArmDataChanges Start ");
+		AtfEtraceMsgStatusEntry entry = etraceMsgStusRepo.findByPropertyId(property.getPropertyId());
+		if (entry == null) {
+			LOG.info("Trace Id not found for the property: %s" + property.getPropertyId());
+			return;
+		}
+
+		String emailTextBody = "Hello,\n\n" + "Please update the following to reflect the new changes: \n";
+		String changedText = null;
+		NCPropertyGeneral asArm = (NCPropertyGeneral) property;
+
+		
+		for (ObjectDiff change : changed) {
+			if (change.getUpdatePath().contains("/propertyType")) {
+				changedText += String.format("FireArm Type:  %s\n", getFireArmType(asArm.getPropertyType()));
+			}
+			if (change.getUpdatePath().contains("/manufacturerCode")) {
+				changedText += String.format("Manufacturer:  %s\n", asArm.getManufacturerCode());
+			}
+			if (change.getUpdatePath().contains("/caliberCode")) {
+				RefArmCaliber refCaliber = commonUtil.getReferenceEntity(RefArmCaliber.class, asArm.getCaliberCode());
+				changedText += String.format("Caliber:  %s\n",
+				        Optional.ofNullable(refCaliber.getDescription()).orElse(ZZ));
+			}
+			if (change.getUpdatePath().contains("/modelCode")) {
+				RefArmModel refModel = commonUtil.getReferenceEntity(RefArmModel.class, asArm.getModelCode());
+				changedText += String.format("Model:  %s\n", Optional.ofNullable(refModel.getDescription()).orElse(ZZ));
+			}
+			if (change.getUpdatePath().contains("/serialNumber")) {
+				changedText += String.format("Serial Number:  %s\n", asArm.getSerialNumber());
+			}
+		}
+		
+		if (StringUtils.hasText(changedText)) {
+			changedText += String.format("\nBest Regards, \nCBP");
+			String subject = "New changes for Trace Number: " + entry.getTraceId();
+			mailService.sendMail(FROM_EMAIL_ADDRESS, emailTo, subject, emailTextBody + changedText);
+		}
+		LOG.info("sendEmailforArmDataChanges End ");
+	}
+
+	
+	@Override
+	public void sendEtracePropertyUpdatesPostApproval(NCProperty existingProperty, NCProperty property) {
+
+        LOG.info("sendEtracePropertyUpdatesPostApproval} ");
+        
+		if (!atfEnabled || !isPropertyEligibleToSendTraces(property)) {
+			return;
+		}
+
+		List<AtfTrace> traces = new ArrayList<AtfTrace>();
+
+		Set<BaseEntity> seen = new LinkedHashSet<BaseEntity>();
+		List<ObjectDiff> changed = new ArrayList<>();
+		Set<Class<?>> classesToIgnore = new LinkedHashSet<>();
+		seacatsObjectDiffUtil.findChanges(existingProperty, property, "", changed, seen, classesToIgnore);
+
+		sendEmailforArmDataChanges(existingProperty, property, changed);
+		
+		for (ObjectDiff change : changed) {
+			if (change.getUpdatePath().contains("/description")) {
+
+				AtfAdmin admin = new AtfAdmin();
+				admin.setSpecialInstructions(property.getDescription());
+				admin.setPropertyId(property.getPropertyId());
+
+				AtfEtraceMsgStatusEntry entry = etraceMsgStusRepo.findByPropertyId(property.getPropertyId());
+				AtfRequestor requestor = new AtfRequestor();
+				requestor.setRequestorEtraceUserId("USCBPTWS1");
+				AtfTrace trace = new AtfTrace();
+				if (entry == null) {
+					continue;
+				}
+				trace.setTraceId(entry.getTraceId());
+				trace.setRecordNumber(traces.size() + 1);
+				trace.setAdmin(admin);
+				trace.setRequestor(requestor);
+				traces.add(trace);
+			}
+		}
+
+		if (!traces.isEmpty()) {
+			sendMessagestoEtrace(traces, property.getEnforcementAction().getIncident().getIncidentNumber(),
+			        HttpMethod.PUT);
+		}
+	}
